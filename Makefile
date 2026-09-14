@@ -13,7 +13,8 @@ MIX ?= 0
 
 # Release upload target variables
 TAG ?= Push$(shell date +%y%m%d)
-REPO ?= Hope2333/opencode-termux
+TAG_IS_SET = $(filter-out file default,$(origin TAG))
+REPO ?= kaikaisadc/opencode-termux
 # Release staging dir: /tmp is not app-writable on Termux; honor TMPDIR
 RELEASE_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/oc-release-$(TAG)
 NATIVE ?=
@@ -437,7 +438,7 @@ family:
 # Usage: make maintain-upload TAG=Push260906 [FAMILY=compressed] [ATTEMPTS=3] [DRY=1] [VERSIONS=V1,V2] [NODES=n1,n2]
 .PHONY: maintain-upload
 maintain-upload:
-	@if [ -z "$(strip $(TAG))" ] || [ "$(strip $(TAG))" = "$(TAG)" ] && [ -z "$(origin TAG)" ]; then \
+	@if [ -z "$(TAG_IS_SET)" ]; then \
 		echo "Error: TAG is required. Example: make maintain-upload TAG=Push260906 FAMILY=compressed"; \
 		exit 1; \
 	fi

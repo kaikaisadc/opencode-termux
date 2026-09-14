@@ -453,9 +453,6 @@ cmd_rollback() {
 	[[ -n "$arc" && -f "$arc" ]] || die "snapshot not found"
 	rm -rf "$(root_of "$name")"
 	mkdir -p "$PLUG_DIR"
-	if [[ -d "$PLUG_DIR/$name" ]]; then
-		rm -rf "$PLUG_DIR/${name:?}"
-	fi
 	case "$arc" in
 	*.tar.zst) tar -C "$PLUG_DIR" -I zstd -xf "$arc" ;;
 	*.tar.gz) tar -C "$PLUG_DIR" -xzf "$arc" ;;
