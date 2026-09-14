@@ -30,7 +30,7 @@ jobs:
   armv7-cross-prebuild:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Prepare output directories
         run: |
@@ -244,7 +244,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_native_armv7 == 'true' }}
     runs-on: [self-hosted, linux, armv7]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Prepare native fallback output directories
         run: |
