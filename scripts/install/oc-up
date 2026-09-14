@@ -1,0 +1,104 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# oc-up — install/update opencode from the kaikaisadc/opencode-termux releases
+# (native bionic build, produced by .github/workflows/release-native.yml).
+#
+#   oc-up            check the latest release and install it when newer
+#   oc-up check      only report installed vs latest
+#   oc-up 1.18.30    install one specific release version
+#
+# Downloads the aarch64 .deb from GitHub and verifies it against the release's
+# SHA256SUMS.txt before dpkg installs it.
+#
+# Install on a device:
+#   curl -fsSL -o "$PREFIX/bin/oc-up" \
+#     https://raw.githubusercontent.com/kaikaisadc/opencode-termux/native-android/scripts/install/oc-up
+#   chmod 755 "$PREFIX/bin/oc-up"
+set -eu
+
+REPO="${OC_UP_REPO:-kaikaisadc/opencode-termux}"
+API="https://api.github.com/repos/$REPO"
+TMP="${TMPDIR:-/tmp}/oc-up.$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+command -v curl >/dev/null 2>&1 || { echo "oc-up: curl is required" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "oc-up: python3 is required" >&2; exit 1; }
+
+# Migrating from the legacy glibc-wrapper packages: their wrapper exported
+# LD_PRELOAD=libtagfix.so into the running opencode process, and upgrading
+# removes that file — after which every child process fails to load. Drop
+# stale entries (files that no longer exist) so dpkg and its children run.
+if [ -n "${LD_PRELOAD:-}" ]; then
+  kept=
+  old_ifs=$IFS
+  IFS=': '
+  for lib in $LD_PRELOAD; do
+    [ -e "$lib" ] && kept="${kept:+$kept:}$lib"
+  done
+  IFS=$old_ifs
+  if [ "$kept" != "$LD_PRELOAD" ]; then
+    echo "oc-up: dropping stale LD_PRELOAD entries: '$LD_PRELOAD' -> '${kept:-<empty>}'"
+    if [ -n "$kept" ]; then export LD_PRELOAD="$kept"; else unset LD_PRELOAD; fi
+  fi
+fi
+
+installed="$(dpkg-query -W -f='${Version}' opencode 2>/dev/null || echo none)"
+
+mode=install
+tag=
+case "${1:-}" in
+  ""|check) ;;
+  [0-9]*.[0-9]*.[0-9]*) tag="v$1" ;;
+  *) echo "usage: oc-up [check | <version>]" >&2; exit 2 ;;
+esac
+[ "${1:-}" = check ] && mode=check
+
+if [ -n "$tag" ]; then rel="$API/releases/tags/$tag"; else rel="$API/releases/latest"; fi
+meta="$(curl -fsSL "$rel")" || { echo "oc-up: could not read release metadata ($rel)" >&2; exit 1; }
+
+eval "$(printf '%s' "$meta" | python3 -c '
+import json, shlex, sys
+r = json.load(sys.stdin)
+tag = r["tag_name"]
+ver = tag[1:] if tag.startswith("v") else tag
+deb = next((a["browser_download_url"] for a in r["assets"]
+            if a["name"].startswith("opencode_") and a["name"].endswith("_aarch64.deb")), "")
+sums = next((a["browser_download_url"] for a in r["assets"]
+             if a["name"] == "SHA256SUMS.txt"), "")
+for k, v in (("tag", tag), ("ver", ver), ("deb_url", deb), ("sums_url", sums)):
+    print(f"{k}={shlex.quote(v)}")
+')"
+
+[ -n "$deb_url" ] || { echo "oc-up: release $tag has no opencode .deb asset" >&2; exit 1; }
+
+echo "installed: $installed"
+echo "latest:    $ver ($tag)"
+
+if [ "$installed" = "$ver" ]; then
+  echo "already up to date"
+  exit 0
+fi
+if [ "$mode" = check ]; then
+  if dpkg --compare-versions "$installed" lt "$ver" 2>/dev/null; then
+    echo "update available: $installed -> $ver"
+  else
+    echo "installed version is not older than $ver (use 'oc-up $ver' to force)"
+  fi
+  exit 0
+fi
+
+deb="$TMP/$(basename "$deb_url")"
+echo "downloading $(basename "$deb_url") ..."
+curl -fsSL -o "$deb" "$deb_url"
+if [ -n "$sums_url" ]; then
+  curl -fsSL -o "$TMP/SHA256SUMS.txt" "$sums_url"
+  grep " $(basename "$deb_url")\$" "$TMP/SHA256SUMS.txt" > "$TMP/sums.one"
+  (cd "$TMP" && sha256sum -c sums.one) || { echo "oc-up: checksum mismatch; aborting" >&2; exit 1; }
+else
+  echo "oc-up: warning: release has no SHA256SUMS.txt; installing unverified" >&2
+fi
+
+dpkg -i "$deb"
+echo "installed: $(dpkg-query -W -f='${Version}' opencode 2>/dev/null || echo unknown)"
+opencode --version
+echo "rollback: keep the previous .deb around and 'dpkg -i' it"

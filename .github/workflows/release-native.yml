@@ -127,6 +127,41 @@ jobs:
             --tgz "$(ls work/opencode-linux-arm64-*.tgz | head -1)" \
             --no-execve
 
+      - name: Verify android Bun base checksum
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          target="$(python3 -c 'import json;print(json.load(open("tools/transplant/config/bun-bind.json"))["target"])')"
+          found=0
+          for zip in artifacts/transplant/android-bun/*.zip; do
+            [ -f "$zip" ] || continue
+            found=1
+            name="$(basename "$zip")"
+            case "$name" in
+              bun-[0-9]*.zip) ver="${name#bun-}"; ver="${ver%.zip}" ;;
+              *) ver="$target" ;;
+            esac
+            sums="bun-sums-$ver.txt"
+            if ! curl -fsSL -o "$sums" "https://github.com/oven-sh/bun/releases/download/bun-v$ver/SHASUMS256.txt"; then
+              echo "::warning::SHASUMS256.txt unavailable for bun-v$ver; cannot verify $name"
+              continue
+            fi
+            want="$(grep -E " \*?${name}\$" "$sums" | awk '{print $1}' | head -1)"
+            if [ -z "$want" ]; then
+              echo "::warning::$name not listed in bun-v$ver SHASUMS256.txt"
+              continue
+            fi
+            got="$(sha256sum "$zip" | awk '{print $1}')"
+            if [ "$want" != "$got" ]; then
+              echo "::error::bun base checksum mismatch for $name (want $want, got $got)"
+              exit 1
+            fi
+            echo "bun base checksum OK: $name ($got)"
+          done
+          if [ "$found" = 0 ]; then
+            echo "::warning::no android Bun zip found in the cache; checksum verification skipped"
+          fi
+
       - name: Assert swap succeeded
         if: steps.gate.outputs.exists != 'true'
         run: |
@@ -215,6 +250,13 @@ jobs:
           - seccomp: self-activating libopencode-crhandler.so (DT_NEEDED, RUNPATH $ORIGIN/../lib/opencode)
 
           Requires Android API >= 28. Verify downloads against SHA256SUMS.txt.
+
+          Migrating from the legacy glibc-wrapper builds (guysoft/opencode-termux,
+          opencode-wrapper)? Run the upgrade from a fresh Termux session and restart
+          the old opencode session afterwards. The legacy wrapper exported
+          LD_PRELOAD=libtagfix.so into the running process; this package no longer
+          ships that file, so subprocesses of a still-running old session fail to
+          load until it is restarted. (oc-up drops stale LD_PRELOAD entries.)
 
             # Termux (dpkg)
             dpkg -i opencode_@V@_aarch64.deb
