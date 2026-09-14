@@ -272,10 +272,12 @@ TS
 		return 0
 	fi
 
+	# Security: install-time lifecycle scripts never run (parity with the
+	# oh-my-opencode main path); plugin build scripts run explicitly below.
 	_npm_install_fallback() {
-		if ! (cd "$pkg" && npm install); then
+		if ! (cd "$pkg" && npm install --ignore-scripts --no-audit --no-fund); then
 			log "npm install failed; retrying with linux platform compatibility flags"
-			if ! (cd "$pkg" && npm_config_platform=linux npm_config_force=true npm install --force); then
+			if ! (cd "$pkg" && npm_config_platform=linux npm_config_force=true npm install --force --ignore-scripts --no-audit --no-fund); then
 				return 1
 			fi
 			if [[ ! -f "$pkg/node_modules/@code-yeongyu/comment-checker/package.json" ]]; then
@@ -300,13 +302,13 @@ PY
 				then
 					return 1
 				fi
-				(cd "$pkg" && npm install --force) || return 1
+				(cd "$pkg" && npm install --force --ignore-scripts --no-audit --no-fund) || return 1
 			fi
 		fi
 	}
 
 	if command -v bun >/dev/null 2>&1 && [[ "${PLUGIN_FORCE_NPM:-0}" != "1" ]]; then
-		if ! (cd "$pkg" && bun install); then
+		if ! (cd "$pkg" && bun install --ignore-scripts); then
 			log "bun install failed; falling back to npm installer path"
 			if ! command -v npm >/dev/null 2>&1; then
 				printf '[plugin-manager] ERROR: missing command: npm\n' >&2
@@ -323,7 +325,8 @@ PY
 	fi
 
 	local scripts script build_succeeded=0
-	if ! scripts="$(python3 - "$pkg/package.json" <<'PY'
+	if ! scripts="$(
+		python3 - "$pkg/package.json" <<'PY'
 import json,sys
 scripts=json.load(open(sys.argv[1])).get("scripts",{})
 for name in ("build","compile"):
