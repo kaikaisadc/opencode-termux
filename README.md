@@ -8,6 +8,21 @@ under the plain `opencode` package name. The glibc wrapper line (inherited from 
 former `pure-android` line) is kept as appendix maintenance. Current branch:
 `native-android` (default mainline).
 
+> **Fork notice — this repository is `kaikaisadc/opencode-termux`.** It tracks the
+> upstream `native-android` line and adds an automated build/release pipeline:
+> GitHub Actions checks the official npm channel daily and publishes verified
+> releases (`.deb`, raw ELF, `SHA256SUMS`).
+>
+> **Recommended install for this fork:** download
+> `opencode_<version>_aarch64.deb` from
+> [this fork's Releases](https://github.com/kaikaisadc/opencode-termux/releases)
+> and run `dpkg -i`, or use the updater
+> [`scripts/install/oc-up`](./scripts/install/oc-up) (it verifies the release's
+> `SHA256SUMS.txt` before installing).
+>
+> The `hope2333.github.io` installer and package source referenced below belong to
+> the upstream author, **not to this fork's artifacts** — review before use.
+
 ---
 
 ## Native line (mainline): zero-glibc single-ELF runtime
@@ -64,7 +79,7 @@ dpkg -i opencode_<version>_aarch64.deb
 pacman -U opencode-<version>-1-aarch64.pkg.tar.xz
 ```
 
-**From the hope2333 software source (recommended)**:
+**From the upstream author's software source (third-party, not this fork's artifacts; the installer script is served from a mutable site — review before use)**:
 
 ```bash
 curl -fsSL https://hope2333.github.io/repo/install.sh | sh -s -- --install opencode   # configure + install
@@ -226,7 +241,8 @@ Packages are distributed through two channels:
 Default install priority: per-repo mirrorlist servers (release CDN) first, Pages-hosted
 source as fallback.
 
-**One-line configure + install**:
+**One-line configure + install** (third-party, not this fork's artifacts — the
+script is served from a mutable site; review it before piping to a shell):
 
 ```bash
 curl -fsSL https://hope2333.github.io/repo/install.sh | sh -s -- --install opencode

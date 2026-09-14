@@ -6,6 +6,19 @@ OpenCode on Termux。**主线 = native bionic 直跑线**：经 transplant 复�
 单个零 glibc Android ELF，以 `opencode` 原名作为正式发布渠道出货。glibc wrapper 线
 （继承自原 `pure-android` 线）保留为附录维护。当前分支：`native-android`（默认主线）。
 
+> **Fork 说明——本仓库是 `kaikaisadc/opencode-termux`**：跟随上游 `native-android`
+> 主线，并增加了自动构建/发布流水线（GitHub Actions 每日检查官方 npm 频道，发布带
+> `SHA256SUMS` 的 `.deb`、原始 ELF 等验证过的产物）。
+>
+> **本 fork 推荐安装方式**：从
+> [本 fork 的 Releases](https://github.com/kaikaisadc/opencode-termux/releases)
+> 下载 `opencode_<version>_aarch64.deb` 后 `dpkg -i`，或使用更新脚本
+> [`scripts/install/oc-up`](./scripts/install/oc-up)（安装前校验 release 的
+> `SHA256SUMS.txt`）。
+>
+> 下方引用的 `hope2333.github.io` 安装脚本与软件源属于上游作者，**不是本 fork 的
+> 产物**，使用前请自行审查。
+
 ---
 
 ## Native 线（主线）：零 glibc 单 ELF 运行时
@@ -59,7 +72,7 @@ dpkg -i opencode_<version>_aarch64.deb
 pacman -U opencode-<version>-1-aarch64.pkg.tar.xz
 ```
 
-**从 hope2333 软件源安装（推荐）**：
+**从上游作者的软件源安装（第三方，非本仓库产物；安装脚本由可变站点提供，使用前请自行审查）**：
 
 ```bash
 curl -fsSL https://hope2333.github.io/repo/install.sh | sh -s -- --install opencode   # 配置 + 安装
@@ -211,7 +224,7 @@ make matrix VERS='1.18.[15-27]' TARGET_HOST=<host> TARGET_USER=<user>
 
 默认安装优先级：per-repo mirrorlist 服务器（release CDN）优先，Pages 托管源作为回退。
 
-**一行命令配置 + 安装**：
+**一行命令配置 + 安装**（第三方，非本仓库产物；脚本由可变站点提供，请先审查再管道给 shell）：
 
 ```bash
 curl -fsSL https://hope2333.github.io/repo/install.sh | sh -s -- --install opencode
