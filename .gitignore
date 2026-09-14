@@ -17,6 +17,9 @@ packing/dpkg/work/
 packing/dpkg-native/
 packing/pacman/pkg/
 packing/pacman/src/
+packing/pacman/.work.lock
+packing/pacman/.makepkg-*.conf
+packing/pacman/.PKGBUILD.*.tmp
 .work/
 
 # Session artifacts / temp test files
