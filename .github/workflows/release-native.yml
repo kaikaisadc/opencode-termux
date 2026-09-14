@@ -1,0 +1,246 @@
+# Auto-build & release the native Android (transplant) OpenCode line.
+#
+# Scheduled: polls the official npm channel `opencode-linux-arm64`; when it is
+# newer than the newest `v<version>` release in this repository, the pipeline
+# runs the full native build and publishes a release:
+#
+#   official npm opencode tgz + official android Bun
+#     -> tools/transplant (extract/detect/convert/patch/assemble/revive)
+#     -> bionic libopentui.so swap      (vendored in tui/)
+#     -> seccomp hardening              (NDK cross-clang + crhandler_patch)
+#     -> aarch64 .deb + raw ELF + report + watcher + SHA256SUMS
+#     -> GitHub release v<version>
+#
+# Manual: workflow_dispatch with an explicit version / prerelease / golden flag.
+#
+# NOTE: this runner is x86_64, so the built aarch64 ELF cannot be executed here
+# (transplant runs with --no-execve; the TUI pty gate records
+# "skipped(no-aarch64)"). On-device verification happens on Termux.
+
+name: Release Native Android
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "opencode version (blank = latest on npm)"
+        required: false
+        default: ""
+      prerelease:
+        description: "publish as prerelease"
+        type: boolean
+        default: false
+      run_golden:
+        description: "run the transplant golden regression first"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-native
+  cancel-in-progress: false
+
+env:
+  TERMUX_PREFIX: /data/data/com.termux/files/usr
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target version
+        id: ver
+        run: |
+          V="${{ github.event.inputs.version }}"
+          if [ -z "$V" ]; then
+            V="$(npm view opencode-linux-arm64 version)"
+          fi
+          case "$V" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "unexpected version: '$V'" >&2; exit 1 ;;
+          esac
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "target version: $V"
+
+      - name: Check for existing release
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "release v${{ steps.ver.outputs.version }} already exists; nothing to do"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install tooling
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq llvm dpkg-dev
+          if ! command -v llvm-strip >/dev/null 2>&1; then
+            STRIP="$(ls /usr/lib/llvm-*/bin/llvm-strip 2>/dev/null | head -1 || true)"
+            if [ -n "$STRIP" ]; then sudo ln -sf "$STRIP" /usr/local/bin/llvm-strip; fi
+          fi
+          command -v llvm-strip
+          echo "NDK: ${ANDROID_NDK_LATEST_HOME:?ANDROID_NDK_LATEST_HOME not set on this runner}"
+          ls "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" \
+            | grep -E '^aarch64-linux-android[0-9]+-clang$' | head -1
+
+      - name: Cache android Bun base
+        if: steps.gate.outputs.exists != 'true'
+        uses: actions/cache@v4
+        with:
+          path: artifacts/transplant/android-bun
+          key: android-bun-${{ hashFiles('tools/transplant/config/bun-bind.json') }}
+
+      - name: Stage vendored bionic libopentui.so
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          mkdir -p artifacts/transplant/opentui-bionic
+          cp tui/libopentui-bionic.so artifacts/transplant/opentui-bionic/libopentui.so
+          bash tools/transplant/build-libopentui.sh --check artifacts/transplant/opentui-bionic/libopentui.so
+
+      - name: Fetch opencode arm64 package (official npm)
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          mkdir -p work
+          npm pack "opencode-linux-arm64@${{ steps.ver.outputs.version }}" --pack-destination work/
+          ls -la work/
+
+      - name: Transplant (no-execve)
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          python3 tools/transplant/transplant.py all \
+            --ver "${{ steps.ver.outputs.version }}" \
+            --tgz "$(ls work/opencode-linux-arm64-*.tgz | head -1)" \
+            --no-execve
+
+      - name: Assert swap succeeded
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          ver = "${{ steps.ver.outputs.version }}"
+          report = json.load(open(f"artifacts/transplant/{ver}/report.json"))
+          swap = report.get("steps", {}).get("swap", {})
+          if swap.get("status") != "ok":
+              print("swap did not succeed:", json.dumps(swap))
+              sys.exit(1)
+          probe = report.get("tui_probe")
+          if probe not in ("pass", "skipped(no-aarch64)"):
+              print(f"unexpected tui_probe verdict: {probe!r}")
+              sys.exit(1)
+          print(f"swap ok; tui_probe={probe}")
+          PY
+
+      - name: Seccomp-harden (NDK cross-clang + crhandler patch)
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          D="artifacts/transplant/$V"
+          CC="$(ls "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*-clang | head -1)"
+          "$CC" -shared -fPIC -O2 -o "$D/libopencode-crhandler.so" tools/shim/sigsys_handler.c
+          cp -p "$D/opencode-native-tui" "$D/opencode-native-tui.pre-crhandler"
+          python3 tools/transplant/crhandler_patch.py "$D/opencode-native-tui"
+          cp -p "$D/opencode-native-tui" "$D/opencode-native-revived"
+          grep -aqF libopencode-crhandler.so "$D/opencode-native-tui"
+          echo "seccomp hardening ok"
+
+      - name: Golden regression (optional)
+        if: steps.gate.outputs.exists != 'true' && github.event.inputs.run_golden == 'true'
+        run: |
+          set -e
+          bash scripts/fetch-fixtures.sh
+          python3 tests/transplant/test_golden.py --fixtures-dir tests/transplant/fixtures/tgz
+
+      - name: Build aarch64 deb
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          ARCH_DEB=aarch64 PREFIX="$TERMUX_PREFIX" VERSION="$V" \
+            MAINTAINER='kaikaisadc (opencode-termux automated build)' \
+            bash scripts/package/package_deb_native.sh
+
+      - name: Collect release assets
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          D="artifacts/transplant/$V"
+          OUT=release
+          mkdir -p "$OUT"
+          cp "$D/opencode-native-tui" "$OUT/opencode-$V-aarch64-android-native"
+          cp "$D/libopencode-crhandler.so" "$OUT/opencode-$V-libopencode-crhandler.so"
+          cp "$D/report.json" "$OUT/opencode-$V-report.json"
+          tar czf "$OUT/opencode-$V-watcher.tar.gz" -C tools/watcher watcher shim.js install.sh
+          cp "packing/dpkg-native/opencode_${V}_aarch64.deb" "$OUT/"
+          readelf -h "$OUT/opencode-$V-aarch64-android-native" | grep -E 'Machine:|Class:'
+          (cd "$OUT" && sha256sum * > SHA256SUMS.txt)
+          ls -l "$OUT"
+
+      - name: Upload build artifacts
+        if: steps.gate.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-native-${{ steps.ver.outputs.version }}
+          path: release/
+          retention-days: 30
+
+      - name: Write release notes
+        if: steps.gate.outputs.exists != 'true'
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          cat > release-notes.md <<'NOTES'
+          Native bionic OpenCode @V@ for Termux / Android aarch64, built automatically by
+          .github/workflows/release-native.yml from official upstream inputs:
+
+          - module graph: npm opencode-linux-arm64@@V@ (official registry)
+          - runtime base: official android Bun (tools/transplant/config/bun-bind.json)
+          - TUI renderer: vendored bionic libopentui.so (see tui/README.md)
+          - seccomp: self-activating libopencode-crhandler.so (DT_NEEDED, RUNPATH $ORIGIN/../lib/opencode)
+
+          Requires Android API >= 28. Verify downloads against SHA256SUMS.txt.
+
+            # Termux (dpkg)
+            dpkg -i opencode_@V@_aarch64.deb
+            opencode --version
+
+          Raw ELF users: keep the ...-android-native binary next to the shim so that
+          ../lib/opencode/libopencode-crhandler.so resolves (or just use the deb).
+          NOTES
+          sed -i "s/@V@/$V/g" release-notes.md
+          cat release-notes.md
+
+      - name: Publish release
+        if: steps.gate.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          FLAGS=""
+          if [ "${{ github.event.inputs.prerelease }}" = "true" ]; then
+            FLAGS="--prerelease"
+          fi
+          gh release create "v$V" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "opencode $V (native aarch64)" \
+            --notes-file release-notes.md \
+            $FLAGS \
+            release/*
+          echo "published: https://github.com/$GITHUB_REPOSITORY/releases/tag/v$V"
