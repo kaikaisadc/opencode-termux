@@ -1,0 +1,38 @@
+{
+  "note": "Bionic (aarch64-linux-android) replacements for the glibc native assets that upstream opencode bundles inside its bun standalone module graph. These cannot load on Termux/bionic (they NEED libc.so.6 / libstdc++.so.6), which silently disables fff file search, the internal file watcher (@parcel/watcher) and the PTY backend. swap_native_assets.py replaces them in place (equal-length, NUL padded). Regenerate with tools/transplant/build-bionic-assets.sh when opencode bumps the upstream deps.",
+  "assets": [
+    {
+      "slot_prefix": "libfff_c-",
+      "file": "libfff_c.so",
+      "component": "fff-c",
+      "upstream_dep": "@ff-labs/fff-bun",
+      "upstream_version": "0.9.4",
+      "symbol_prefixes": ["fff_"],
+      "tested_opencode": ["1.18.30"],
+      "sha256": "4b3e5b3cf6da01176ce782385d31a598d6b94d84c980906cf08e0768bc0efbba",
+      "recipe": "cargo build --release -p fff-c --features mimalloc (tag v0.9.4) + local patch: mimalloc global allocator + untagged mmap instance handle (Android scudo tags heap pointers >2^53, which breaks bun:ffi's JS-number pointer round-trip)"
+    },
+    {
+      "slot_prefix": "watcher-",
+      "file": "watcher.node",
+      "component": "@parcel/watcher",
+      "upstream_dep": "@parcel/watcher",
+      "upstream_version": "2.5.1",
+      "symbol_prefixes": ["napi_register_module_v1"],
+      "tested_opencode": ["1.18.30"],
+      "sha256": "5f3114db5526436ebf7dd550cec80676e0693a82a7735d31d99cd30c696234fe",
+      "recipe": "clang++ -shared -fPIC -std=c++17 -O2 -DNAPI_DISABLE_CPP_EXCEPTIONS -DWATCHMAN -DINOTIFY -DBRUTE_FORCE (src/*.cc + src/linux/InotifyBackend.cc + src/unix/legacy.cc) with node-addon-api@7 headers, then llvm-strip --strip-unneeded"
+    },
+    {
+      "slot_prefix": "librust_pty_arm64-",
+      "file": "librust_pty.so",
+      "component": "bun-pty/rust-pty",
+      "upstream_dep": "bun-pty",
+      "upstream_version": "0.4.10",
+      "symbol_prefixes": ["bun_pty_"],
+      "tested_opencode": ["1.18.30"],
+      "sha256": "1a014814f1f1029fdf157ee4d93f567d2764f8c77e778376d1d492846e5f1406",
+      "recipe": "cargo build --release in bun-pty/rust-pty with the vendored termios@0.2.2 patched to accept target_os=\"android\" (its os/mod.rs only cfg'd linux/macos/bsd)"
+    }
+  ]
+}

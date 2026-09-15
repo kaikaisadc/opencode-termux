@@ -320,7 +320,45 @@ make transplant-upx VER=1.18.21
 
 ---
 
-## 附：watcher 集成点（todo 15）
+## 原生资产替换：bionic swap（todo 15 最终方案）
+
+上游 opencode 把三个原生库内嵌在 bun standalone module graph 里，均为
+aarch64-**linux-gnu（glibc）**：
+
+| 槽位 | 组件 | 作用 | 失败后果 |
+|---|---|---|---|
+| `/$bunfs/root/libfff_c-<hash>.so` | fff-c | 文件搜索 / grep | fff 不可用，退化到非 fff 搜索 |
+| `/$bunfs/root/watcher-<hash>.node` | @parcel/watcher | 内部文件监听 | `watcher()` 返回 undefined → 无监听 |
+| `/$bunfs/root/librust_pty_arm64-<hash>.so` | bun-pty | PTY 后端 | 终端不可用 |
+
+bionic 上它们 `NEED libc.so.6` / `libstdc++.so.6`，dlopen 直接失败。
+
+修复：`transplant.py all` 第 9 步（**仅 section 格式，>=1.18**；trailer 老版本跳过，
+不碰 golden 产物）调用
+`tools/transplant/swap_native_assets.py`，把 `tools/prebuilt/bionic/` 下预编译的
+bionic 资产**等长**替换进 `opencode-native-tui`（NUL 补齐，所有下游偏移不变）。
+替换前做尺寸 + 导出符号（ABI）校验，任一不满足即**硬失败**（正确性门禁，非可选）。
+`tools/prebuilt/bionic/MANIFEST.json` 记录各资产的 sha256、上游依赖版本、测试过的
+opencode 版本与构建配方。
+
+升级 opencode 后若上游依赖版本变化，用
+`tools/transplant/build-bionic-assets.sh [all|fff|watcher|pty]` 重新生成资产并刷新
+manifest sha256（脚本内含 fff 的 mimalloc/无 tag handle 补丁与 termios android 补丁）。
+
+fff 额外根因：Android scudo 返回带 tag 指针（0xb4…）> 2^53，`bun:ffi read.ptr`
+以 JS number 返回会丢精度，回传即崩。故 fff-c 加 **mimalloc 全局分配器**（mmap、
+无 tag）+ 实例 mmap 分配，使所有跨 FFI 的指针都能被 JS number 精确表示。
+
+### 验证（已实测）
+
+- 管线产物 + `make deb-native` 的 deb 内二进制三个资产均为 bionic（`NEED libc.so`）。
+- watcher：插件 `event` 钩子收到真实 `file.watcher.updated {"file":…,"event":"add"}`。
+- fff：`opencode debug file search` 正常出结果、无崩溃。
+- pty：`POST /pty` 起 shell 并经 WebSocket 读到真实输出。
+
+---
+
+## 附：watcher 集成点（todo 15，**legacy**，已被上面的 bionic swap 取代）
 
 ### 背景
 

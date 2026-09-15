@@ -80,6 +80,7 @@ from probe_assemble import (  # noqa: E402
 DEFAULT_BUN_VERSION = "1.3.14"
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 REVIVE_SCRIPT = Path(__file__).resolve().parent / "revive_patch.py"
+NATIVE_ASSETS_SCRIPT = Path(__file__).resolve().parent / "swap_native_assets.py"
 SECTION_MIN_FORMAT_VER = (1, 18, 0)  # opencode >=1.18 uses the .bun section format
 
 
@@ -723,6 +724,36 @@ def swap_step(binary: Path, tui_lib: Path, out: Path, strip: bool = True) -> dic
             f"{proc.stderr.strip() or proc.stdout.strip()}"
         )
     return {"out": str(out), "status": "ok", "swap_stderr": proc.stderr.strip()}
+
+
+def native_assets_dir() -> Path:
+    return repo_root() / "tools" / "prebuilt" / "bionic"
+
+
+def swap_native_assets_step(binary: Path, assets_dir: Path, require_all: bool = False) -> dict:
+    """Replace upstream glibc fff/watcher/pty assets with prebuilt bionic ones.
+
+    In-place, equal-length (NUL padded) via swap_native_assets.py, so every
+    downstream offset is untouched. Without this the three libraries stay
+    aarch64-linux-gnu and cannot dlopen on bionic, silently disabling fff file
+    search, the internal @parcel/watcher file watcher and the PTY backend.
+    """
+    if not NATIVE_ASSETS_SCRIPT.is_file():
+        raise TransplantError(f"swap_native_assets.py not found: {NATIVE_ASSETS_SCRIPT}")
+    manifest = assets_dir / "MANIFEST.json"
+    if not manifest.is_file():
+        raise TransplantError(f"bionic asset manifest not found: {manifest}")
+    cmd = [sys.executable, str(NATIVE_ASSETS_SCRIPT),
+           "--binary", str(binary), "--assets-dir", str(assets_dir)]
+    if require_all:
+        cmd.append("--require-all")
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise TransplantError(
+            f"swap_native_assets failed (exit {proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()}"
+        )
+    return {"status": "ok", "out": str(binary), "detail": proc.stdout.strip()}
 
 
 def cmd_tui_probe(args) -> int:
@@ -1430,6 +1461,43 @@ def cmd_all(args) -> int:
             "verdict": "skipped(no-bionic-lib)",
             "reason": "artifacts/transplant/opentui-bionic/libopentui.so absent",
         }
+
+    # 9. swap bionic fff/watcher/pty native assets (glibc -> bionic, in place).
+    # Correctness gate, not cosmetic: without it fff file search, the internal
+    # file watcher and the PTY stay glibc and silently break on Termux. Fail loud.
+    print("== swap native assets ==")
+    assets_dir = native_assets_dir()
+    # Never touch out_path: it is the raw concat artifact the golden regression
+    # hashes; only the shipped tui/revived product is patched.
+    asset_target = tui_bin if tui_bin.is_file() else revived_path if revived_path.is_file() else None
+    if not section_mode:
+        # Pre-1.18 (trailer) builds predate this native-asset layout; leave them
+        # byte-identical (golden regression) and out of scope.
+        report["steps"]["native_assets"] = {
+            "status": "skipped",
+            "reason": "trailer format (pre-1.18); bionic asset slots not applicable",
+        }
+        print("  skipped (trailer format)")
+    elif assets_dir.is_dir() and asset_target is not None:
+        try:
+            na_info = swap_native_assets_step(asset_target, assets_dir, require_all=section_mode)
+            report["steps"]["native_assets"] = na_info
+            print(f"  bionic native assets swapped -> {asset_target}")
+            for line in na_info["detail"].splitlines():
+                print(f"  {line}")
+        except TransplantError as e:
+            # Correctness gate for the native mainline: a silent skip would
+            # re-introduce the glibc fff/watcher/pty breakage.
+            report["steps"]["native_assets"] = {"status": "failed", "error": str(e)}
+            save_report(out_dir, report)
+            raise
+    else:
+        reason = (
+            f"assets dir absent: {assets_dir}" if not assets_dir.is_dir()
+            else "no tui/revived product to patch"
+        )
+        report["steps"]["native_assets"] = {"status": "skipped", "reason": reason}
+        print(f"  WARN: skipping native-asset swap ({reason})")
 
     save_report(out_dir, report)
     print(f"\nreport: {report_path(out_dir)}")

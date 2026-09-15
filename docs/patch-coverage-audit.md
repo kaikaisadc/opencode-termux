@@ -115,14 +115,16 @@
 在 26 个包二进制中 `crshim` / `libopencode-crshim.so` 字符串扫描均为零命中。
 该热修资产只应存在于 native-beta-260826 release，不得混入新包 —— 达成。
 
-### L8 — watcher 资产判定
+### L8 — 原生资产（watcher / fff / pty）判定
 
-包内不含 watcher 文件属**设计**（deb/pacman data 成员仅 `bin/opencode` +
-`lib/opencode/libopencode-crhandler.so` 两个文件）。Push260903 release 资产亦无
-`watcher.tar.gz`（Push260822 曾带过）。判定：**非缺口** —— watcher 栈
-（`tools/watcher/`：`watcher.c` inotify 守护 + `shim.js` 插件侧）尚未纳入正式
-发布矩阵，走仓库分发即可；若未来要分发，建议以独立 release 资产补挂，不阻塞
-13 版批量。
+包内 data 成员仍只有 `bin/opencode` + `lib/opencode/libopencode-crhandler.so`：
+三个原生库是**内嵌在 `bin/opencode` 的 bun standalone module graph 里**的，不单独
+成文件。自本批起 `transplant.py all` 第 9 步（`swap_native_assets.py` + 预编译
+`tools/prebuilt/bionic/`）把上游 glibc 版**等长替换**为 bionic 版，`make deb-native`
+出的包内二进制即含 bionic fff / @parcel/watcher / rust-pty（已实测：内部 watcher
+发出真实 `file.watcher.updated`、fff 搜索正常、PTY I/O 正常）。判定：**已闭环**，
+无需独立 release 资产；旧的 `tools/watcher/` 外部守护 + 哨兵插件方案退役（legacy）。
+升级上游依赖版本时用 `tools/transplant/build-bionic-assets.sh` 重生成资产。
 
 ## 二、缺口清单
 
@@ -145,7 +147,7 @@
 | L5 | D1 教义矩阵 + 本审计扫描器可复跑（control/PKGINFO 全枚举比对） | compressed 冲突名单已闭合成完整矩阵 |
 | L6 | compressed 单版本试点，扩展时复用 L3/L5 扫描器 | 无需逐版手工 |
 | L7 | 新包二进制 `crshim` 字符串扫描（本审计扫描器内置） | 发布前跑一遍即可 |
-| L8 | watcher 独立于包矩阵；若入发布矩阵则补 release 资产 + 本审计复跑 | 判定记录于证据日志 |
+| L8 | 原生资产（watcher/fff/pty）随包内嵌；`transplant.py` 第 9 步等长换成 bionic（尺寸+ABI 硬门禁） | 每版 report.json `native_assets` 步骤 + `swap_native_assets.py --check` |
 
 ## 四、方法与证据
 

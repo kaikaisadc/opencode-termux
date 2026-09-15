@@ -1,0 +1,151 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 7eb9d48..c1a2403 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -638,6 +638,7 @@ dependencies = [
+  "fff-query-parser",
+  "fff-search",
+  "git2",
++ "mimalloc",
+  "serde_json",
+ ]
+ 
+diff --git a/crates/fff-c/Cargo.toml b/crates/fff-c/Cargo.toml
+index bc1fe53..a85f52e 100644
+--- a/crates/fff-c/Cargo.toml
++++ b/crates/fff-c/Cargo.toml
+@@ -11,10 +11,14 @@ crate-type = ["cdylib"]
+ [features]
+ default = []
+ zlob = ["fff/zlob"]
++# Android: scudo tags heap pointers (>2^53); FFI surfaces them as JS numbers,
++# so use mimalloc (mmap-backed, untagged) as the global allocator.
++mimalloc = ["dep:mimalloc"]
+ 
+ [dependencies]
+ git2.workspace = true
+ 
++mimalloc = { version = "0.1", optional = true, features = ["local_dynamic_tls"] }
+ fff = { package = "fff-search", path = "../fff-core" , version = "0.9.4" }
+ fff-query-parser = { path = "../fff-query-parser" , version = "0.9.4" }
+ serde_json = "1.0"
+diff --git a/crates/fff-c/src/lib.rs b/crates/fff-c/src/lib.rs
+index 0e0d0c9..9720b3e 100644
+--- a/crates/fff-c/src/lib.rs
++++ b/crates/fff-c/src/lib.rs
+@@ -28,6 +28,13 @@ use std::time::Duration;
+ 
+ use fff::shared::SharedQueryTracker;
+ 
++// Android: scudo returns top-byte-tagged heap pointers (>2^53). FFI runtimes that
++// surface pointers as JS numbers (bun:ffi `read.ptr`) lose precision, so route all
++// allocations through mimalloc, whose mmap-backed pointers are untagged.
++#[cfg(feature = "mimalloc")]
++#[global_allocator]
++static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
++
+ mod accessors;
+ mod ffi_types;
+ 
+@@ -52,6 +59,43 @@ struct FffInstance {
+     query_tracker: SharedQueryTracker,
+ }
+ 
++// Raw mmap so the opaque handle lives in untagged memory (see instance_alloc).
++unsafe extern "C" {
++    fn mmap(
++        addr: *mut c_void,
++        length: usize,
++        prot: i32,
++        flags: i32,
++        fd: i32,
++        offset: i64,
++    ) -> *mut c_void;
++    fn munmap(addr: *mut c_void, length: usize) -> i32;
++}
++const PROT_READ: i32 = 1;
++const PROT_WRITE: i32 = 2;
++const MAP_PRIVATE: i32 = 0x02;
++const MAP_ANONYMOUS: i32 = 0x20;
++
++/// Move an instance into untagged anonymous mmap memory and return its pointer.
++unsafe fn instance_alloc(instance: FffInstance) -> *mut c_void {
++    let size = std::mem::size_of::<FffInstance>();
++    let p = unsafe {
++        mmap(
++            std::ptr::null_mut(),
++            size,
++            PROT_READ | PROT_WRITE,
++            MAP_PRIVATE | MAP_ANONYMOUS,
++            -1,
++            0,
++        )
++    };
++    if p.is_null() || p as isize == -1 {
++        return std::ptr::null_mut();
++    }
++    unsafe { std::ptr::write(p as *mut FffInstance, instance) };
++    p
++}
++
+ /// Helper to convert C string to Rust &str.
+ ///
+ /// Returns `None` if the pointer is null or the string is not valid UTF-8.
+@@ -300,13 +344,19 @@ pub unsafe extern "C" fn fff_create_instance_with(opts: *const FffCreateOptions)
+         return FffResult::err(&format!("Failed to init file picker: {}", e));
+     }
+ 
+-    let instance = Box::new(FffInstance {
++    let instance = FffInstance {
+         picker: shared_picker,
+         frecency: shared_frecency,
+         query_tracker,
+-    });
++    };
+ 
+-    let fff_handle = Box::into_raw(instance) as *mut c_void;
++    // Android scudo returns top-byte-tagged heap pointers (> 2^53). FFI runtimes
++    // that surface pointers as JS numbers (bun:ffi `read.ptr`) lose precision on
++    // those, so the opaque handle is placed in untagged mmap memory instead.
++    let fff_handle = unsafe { instance_alloc(instance) };
++    if fff_handle.is_null() {
++        return FffResult::err("failed to allocate fff instance");
++    }
+     FffResult::ok_handle(fff_handle)
+ }
+ 
+@@ -339,19 +389,23 @@ pub unsafe extern "C" fn fff_destroy(fff_handle: *mut c_void) {
+         return;
+     }
+ 
+-    let instance = unsafe { Box::from_raw(fff_handle as *mut FffInstance) };
++    let instance = fff_handle as *mut FffInstance;
+ 
+-    if let Ok(mut guard) = instance.picker.write()
+-        && let Some(picker) = guard.take()
+-    {
+-        drop(picker);
+-    }
++    unsafe {
++        if let Ok(mut guard) = (*instance).picker.write()
++            && let Some(picker) = guard.take()
++        {
++            drop(picker);
++        }
+ 
+-    if let Ok(mut guard) = instance.frecency.write() {
+-        *guard = None;
+-    }
+-    if let Ok(mut guard) = instance.query_tracker.write() {
+-        *guard = None;
++        if let Ok(mut guard) = (*instance).frecency.write() {
++            *guard = None;
++        }
++        if let Ok(mut guard) = (*instance).query_tracker.write() {
++            *guard = None;
++        }
++        std::ptr::drop_in_place(instance);
++        munmap(fff_handle, std::mem::size_of::<FffInstance>());
+     }
+ }
+ 
